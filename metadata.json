@@ -1,0 +1,8 @@
+{
+  "name": "We Share",
+  "description": "Mobile-first cloud media sharing and live streaming platform with real-time chat.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

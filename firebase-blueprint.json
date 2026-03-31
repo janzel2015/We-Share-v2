@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user profile information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "email": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "email"]
+    },
+    "Stream": {
+      "title": "Live Stream",
+      "description": "Stores information about active live streams",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "hostUid": { "type": "string" },
+        "hostName": { "type": "string" },
+        "status": { "type": "string", "enum": ["live", "ended"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "hostUid", "status"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Stores chat messages for a stream",
+      "type": "object",
+      "properties": {
+        "streamId": { "type": "string" },
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "text": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["streamId", "uid", "text", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": "UserProfile",
+      "description": "User profiles"
+    },
+    "/streams/{streamId}": {
+      "schema": "Stream",
+      "description": "Live stream metadata"
+    },
+    "/streams/{streamId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Chat messages for a specific stream"
+    }
+  }
+}

@@ -1,0 +1,439 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  collection, 
+  addDoc, 
+  query, 
+  orderBy, 
+  onSnapshot, 
+  serverTimestamp, 
+  setDoc, 
+  doc, 
+  getDoc,
+  where,
+  limit
+} from 'firebase/firestore';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { db, auth, signIn, logOut } from './firebase';
+import { io, Socket } from 'socket.io-client';
+import { motion, AnimatePresence } from 'motion/react';
+import { 
+  Camera, 
+  Mic, 
+  MicOff, 
+  Video, 
+  VideoOff, 
+  Send, 
+  LogOut, 
+  LogIn, 
+  Users, 
+  MessageSquare,
+  Play,
+  Square,
+  ChevronRight,
+  User as UserIcon,
+  Radio
+} from 'lucide-react';
+import { cn } from './lib/utils';
+
+// --- Types ---
+interface ChatMessage {
+  id: string;
+  uid: string;
+  displayName: string;
+  text: string;
+  createdAt: any;
+}
+
+interface Stream {
+  id: string;
+  title: string;
+  hostUid: string;
+  hostName: string;
+  status: 'live' | 'ended';
+}
+
+export default function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [activeStream, setActiveStream] = useState<Stream | null>(null);
+  const [streams, setStreams] = useState<Stream[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [newMessage, setNewMessage] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoOff, setIsVideoOff] = useState(false);
+  const [viewMode, setViewMode] = useState<'lobby' | 'stream'>('lobby');
+
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const socketRef = useRef<Socket | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+
+  // --- Auth & Firebase Init ---
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setIsAuthReady(true);
+      if (u) {
+        // Sync user profile
+        setDoc(doc(db, 'users', u.uid), {
+          uid: u.uid,
+          displayName: u.displayName || 'Anonymous',
+          email: u.email,
+          photoURL: u.photoURL,
+          lastSeen: serverTimestamp()
+        }, { merge: true });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // --- Socket.io & WebRTC Init ---
+  useEffect(() => {
+    socketRef.current = io();
+
+    socketRef.current.on('offer', async ({ offer, from }) => {
+      if (!peerConnectionRef.current) createPeerConnection();
+      await peerConnectionRef.current?.setRemoteDescription(new RTCSessionDescription(offer));
+      const answer = await peerConnectionRef.current?.createAnswer();
+      await peerConnectionRef.current?.setLocalDescription(answer);
+      socketRef.current?.emit('answer', { roomId: activeStream?.id, answer });
+    });
+
+    socketRef.current.on('answer', async ({ answer }) => {
+      await peerConnectionRef.current?.setRemoteDescription(new RTCSessionDescription(answer));
+    });
+
+    socketRef.current.on('ice-candidate', async ({ candidate }) => {
+      await peerConnectionRef.current?.addIceCandidate(new RTCIceCandidate(candidate));
+    });
+
+    return () => {
+      socketRef.current?.disconnect();
+    };
+  }, [activeStream]);
+
+  // --- Fetch Streams ---
+  useEffect(() => {
+    if (!isAuthReady) return;
+    const q = query(collection(db, 'streams'), where('status', '==', 'live'), orderBy('createdAt', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const s = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Stream));
+      setStreams(s);
+    });
+    return () => unsubscribe();
+  }, [isAuthReady]);
+
+  // --- Fetch Messages ---
+  useEffect(() => {
+    if (!activeStream) return;
+    const q = query(
+      collection(db, 'streams', activeStream.id, 'messages'),
+      orderBy('createdAt', 'asc'),
+      limit(50)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const m = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatMessage));
+      setMessages(m);
+    });
+    return () => unsubscribe();
+  }, [activeStream]);
+
+  // --- WebRTC Helpers ---
+  const createPeerConnection = () => {
+    const pc = new RTCPeerConnection({
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    });
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        socketRef.current?.emit('ice-candidate', { roomId: activeStream?.id, candidate: event.candidate });
+      }
+    };
+
+    pc.ontrack = (event) => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = event.streams[0];
+      }
+    };
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, localStreamRef.current!);
+      });
+    }
+
+    peerConnectionRef.current = pc;
+    return pc;
+  };
+
+  const startStreaming = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+      
+      const streamDoc = await addDoc(collection(db, 'streams'), {
+        title: `${user?.displayName}'s Stream`,
+        hostUid: user?.uid,
+        hostName: user?.displayName,
+        status: 'live',
+        createdAt: serverTimestamp()
+      });
+
+      const newStream = { id: streamDoc.id, title: `${user?.displayName}'s Stream`, hostUid: user?.uid!, hostName: user?.displayName!, status: 'live' as const };
+      setActiveStream(newStream);
+      socketRef.current?.emit('join-room', streamDoc.id);
+      setIsStreaming(true);
+      setViewMode('stream');
+    } catch (err) {
+      console.error("Error starting stream:", err);
+    }
+  };
+
+  const joinStream = async (stream: Stream) => {
+    setActiveStream(stream);
+    setViewMode('stream');
+    socketRef.current?.emit('join-room', stream.id);
+    
+    const pc = createPeerConnection();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socketRef.current?.emit('offer', { roomId: stream.id, offer });
+  };
+
+  const stopStreaming = async () => {
+    if (activeStream) {
+      await setDoc(doc(db, 'streams', activeStream.id), { status: 'ended' }, { merge: true });
+    }
+    localStreamRef.current?.getTracks().forEach(track => track.stop());
+    peerConnectionRef.current?.close();
+    setIsStreaming(false);
+    setViewMode('lobby');
+    setActiveStream(null);
+  };
+
+  const sendMessage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newMessage.trim() || !activeStream || !user) return;
+
+    await addDoc(collection(db, 'streams', activeStream.id, 'messages'), {
+      uid: user.uid,
+      displayName: user.displayName,
+      text: newMessage,
+      createdAt: serverTimestamp()
+    });
+    setNewMessage('');
+  };
+
+  if (!isAuthReady) return <div className="h-screen flex items-center justify-center bg-zinc-950 text-white">Loading...</div>;
+
+  if (!user) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-zinc-950 text-white p-6">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="text-center space-y-8 max-w-md"
+        >
+          <div className="w-24 h-24 bg-orange-500 rounded-3xl mx-auto flex items-center justify-center shadow-2xl shadow-orange-500/20">
+            <Radio className="w-12 h-12 text-white" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-5xl font-black tracking-tighter uppercase italic">We Share</h1>
+            <p className="text-zinc-400 font-medium">Mobile-first live streaming for the next generation.</p>
+          </div>
+          <button 
+            onClick={signIn}
+            className="w-full py-4 bg-white text-black font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-zinc-200 transition-colors"
+          >
+            <LogIn className="w-5 h-5" />
+            Continue with Google
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden font-sans">
+      {/* Header */}
+      <header className="p-4 flex items-center justify-between border-b border-zinc-900 bg-zinc-950/50 backdrop-blur-xl sticky top-0 z-50">
+        <div className="flex items-center gap-2">
+          <div className="w-8 h-8 bg-orange-500 rounded-lg flex items-center justify-center">
+            <Radio className="w-5 h-5 text-white" />
+          </div>
+          <span className="font-black tracking-tighter uppercase italic text-xl">We Share</span>
+        </div>
+        <button onClick={logOut} className="p-2 hover:bg-zinc-900 rounded-full transition-colors">
+          <LogOut className="w-5 h-5 text-zinc-400" />
+        </button>
+      </header>
+
+      <main className="flex-1 overflow-y-auto">
+        <AnimatePresence mode="wait">
+          {viewMode === 'lobby' ? (
+            <motion.div 
+              key="lobby"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="p-4 space-y-8"
+            >
+              {/* Hero / Action */}
+              <section className="bg-gradient-to-br from-zinc-900 to-zinc-950 p-6 rounded-3xl border border-zinc-800 shadow-xl">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="space-y-1">
+                    <h2 className="text-2xl font-bold">Ready to go live?</h2>
+                    <p className="text-zinc-400 text-sm">Share your world with everyone.</p>
+                  </div>
+                  <div className="w-12 h-12 bg-zinc-800 rounded-full flex items-center justify-center">
+                    <Video className="w-6 h-6 text-orange-500" />
+                  </div>
+                </div>
+                <button 
+                  onClick={startStreaming}
+                  className="w-full py-4 bg-orange-500 hover:bg-orange-600 text-white font-bold rounded-2xl transition-all shadow-lg shadow-orange-500/20 flex items-center justify-center gap-2"
+                >
+                  <Play className="w-5 h-5 fill-current" />
+                  Start Broadcast
+                </button>
+              </section>
+
+              {/* Live Now */}
+              <section className="space-y-4">
+                <div className="flex items-center justify-between px-2">
+                  <h3 className="text-lg font-bold flex items-center gap-2">
+                    <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                    Live Now
+                  </h3>
+                  <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{streams.length} Active</span>
+                </div>
+                
+                <div className="grid gap-4">
+                  {streams.length > 0 ? streams.map(s => (
+                    <motion.div 
+                      key={s.id}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => joinStream(s)}
+                      className="group bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex items-center gap-4 hover:bg-zinc-900 transition-colors cursor-pointer"
+                    >
+                      <div className="w-16 h-16 bg-zinc-800 rounded-xl flex items-center justify-center overflow-hidden relative">
+                        <UserIcon className="w-8 h-8 text-zinc-700" />
+                        <div className="absolute top-1 left-1 bg-red-500 text-[10px] font-black px-1.5 py-0.5 rounded uppercase">Live</div>
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-bold truncate">{s.title}</h4>
+                        <p className="text-sm text-zinc-500 truncate">@{s.hostName}</p>
+                      </div>
+                      <ChevronRight className="w-5 h-5 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
+                    </motion.div>
+                  )) : (
+                    <div className="py-12 text-center space-y-3">
+                      <div className="w-16 h-16 bg-zinc-900 rounded-full mx-auto flex items-center justify-center">
+                        <VideoOff className="w-8 h-8 text-zinc-800" />
+                      </div>
+                      <p className="text-zinc-500 font-medium">No active streams right now.</p>
+                    </div>
+                  )}
+                </div>
+              </section>
+            </motion.div>
+          ) : (
+            <motion.div 
+              key="stream"
+              initial={{ opacity: 0, scale: 1.1 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.9 }}
+              className="h-full flex flex-col relative"
+            >
+              {/* Video Area */}
+              <div className="flex-1 bg-black relative overflow-hidden">
+                <video 
+                  ref={isStreaming ? localVideoRef : remoteVideoRef}
+                  autoPlay 
+                  playsInline 
+                  muted={isStreaming}
+                  className="w-full h-full object-cover"
+                />
+                
+                {/* Overlay UI */}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 p-4 flex flex-col justify-between">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3 bg-black/40 backdrop-blur-md p-2 pr-4 rounded-full border border-white/10">
+                      <div className="w-8 h-8 bg-zinc-800 rounded-full flex items-center justify-center overflow-hidden">
+                        <UserIcon className="w-5 h-5 text-zinc-500" />
+                      </div>
+                      <div>
+                        <p className="text-xs font-bold leading-none">{activeStream?.hostName}</p>
+                        <p className="text-[10px] text-zinc-400">Live • 1.2k watching</p>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={stopStreaming}
+                      className="bg-red-500 text-white px-4 py-2 rounded-full font-bold text-sm shadow-lg shadow-red-500/20"
+                    >
+                      {isStreaming ? 'End' : 'Leave'}
+                    </button>
+                  </div>
+
+                  {/* Chat Overlay */}
+                  <div className="max-h-[40%] overflow-y-auto space-y-2 mask-linear-gradient">
+                    {messages.map(m => (
+                      <div key={m.id} className="flex items-start gap-2 animate-in slide-in-from-left-2 duration-300">
+                        <span className="text-xs font-black text-orange-400 whitespace-nowrap">{m.displayName}:</span>
+                        <span className="text-xs text-white/90 leading-relaxed">{m.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Chat Input */}
+              <div className="p-4 bg-zinc-950 border-t border-zinc-900">
+                <form onSubmit={sendMessage} className="flex gap-2">
+                  <input 
+                    type="text" 
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    placeholder="Say something..."
+                    className="flex-1 bg-zinc-900 border-none rounded-2xl px-4 py-3 text-sm focus:ring-2 focus:ring-orange-500 transition-all"
+                  />
+                  <button 
+                    type="submit"
+                    className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20 active:scale-95 transition-transform"
+                  >
+                    <Send className="w-5 h-5" />
+                  </button>
+                </form>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </main>
+
+      {/* Bottom Nav (Only in Lobby) */}
+      {viewMode === 'lobby' && (
+        <nav className="p-4 pb-8 flex justify-around border-t border-zinc-900 bg-zinc-950/80 backdrop-blur-xl">
+          <button className="flex flex-col items-center gap-1 text-orange-500">
+            <Radio className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Explore</span>
+          </button>
+          <button className="flex flex-col items-center gap-1 text-zinc-500">
+            <Users className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Friends</span>
+          </button>
+          <button className="flex flex-col items-center gap-1 text-zinc-500">
+            <MessageSquare className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Inbox</span>
+          </button>
+          <button className="flex flex-col items-center gap-1 text-zinc-500">
+            <UserIcon className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Profile</span>
+          </button>
+        </nav>
+      )}
+    </div>
+  );
+}
