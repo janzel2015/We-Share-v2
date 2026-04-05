@@ -8,10 +8,9 @@
         "uid": { "type": "string" },
         "displayName": { "type": "string" },
         "photoURL": { "type": "string" },
-        "email": { "type": "string" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
-      "required": ["uid", "displayName", "email"]
+      "required": ["uid", "displayName"]
     },
     "Stream": {
       "title": "Live Stream",

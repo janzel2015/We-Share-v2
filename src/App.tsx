@@ -44,6 +44,11 @@ interface ChatMessage {
   createdAt: any;
 }
 
+interface UserProfile {
+  uid: string;
+  displayName: string;
+}
+
 interface Stream {
   id: string;
   title: string;
@@ -53,7 +58,7 @@ interface Stream {
 }
 
 export default function App() {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<UserProfile | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [activeStream, setActiveStream] = useState<Stream | null>(null);
   const [streams, setStreams] = useState<Stream[]>([]);
@@ -75,23 +80,31 @@ export default function App() {
   const screenStreamRef = useRef<MediaStream | null>(null);
   const fileStreamRef = useRef<MediaStream | null>(null);
 
-  // --- Auth & Firebase Init ---
+  // --- Anonymous User Init ---
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (u) {
-        // Sync user profile
-        setDoc(doc(db, 'users', u.uid), {
-          uid: u.uid,
-          displayName: u.displayName || 'Anonymous',
-          email: u.email,
-          photoURL: u.photoURL,
-          lastSeen: serverTimestamp()
-        }, { merge: true });
-      }
-    });
-    return () => unsubscribe();
+    const storedUid = localStorage.getItem('we-share-uid');
+    const storedName = localStorage.getItem('we-share-name');
+    
+    let uid = storedUid;
+    let name = storedName;
+
+    if (!uid || !name) {
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      uid = `user_${randomNum}_${Date.now()}`;
+      name = `User ${randomNum}`;
+      localStorage.setItem('we-share-uid', uid);
+      localStorage.setItem('we-share-name', name);
+    }
+
+    const profile = { uid, displayName: name };
+    setUser(profile);
+    setIsAuthReady(true);
+
+    // Sync user profile to Firestore (optional but helpful for discovery)
+    setDoc(doc(db, 'users', uid), {
+      ...profile,
+      lastSeen: serverTimestamp()
+    }, { merge: true });
   }, []);
 
   // --- Socket.io & WebRTC Init ---
@@ -369,34 +382,7 @@ export default function App() {
     setNewMessage('');
   };
 
-  if (!isAuthReady) return <div className="h-screen flex items-center justify-center bg-zinc-950 text-white">Loading...</div>;
-
-  if (!user) {
-    return (
-      <div className="h-screen flex flex-col items-center justify-center bg-zinc-950 text-white p-6">
-        <motion.div 
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="text-center space-y-8 max-w-md"
-        >
-          <div className="w-24 h-24 bg-orange-500 rounded-3xl mx-auto flex items-center justify-center shadow-2xl shadow-orange-500/20">
-            <Radio className="w-12 h-12 text-white" />
-          </div>
-          <div className="space-y-2">
-            <h1 className="text-5xl font-black tracking-tighter uppercase italic">We Share</h1>
-            <p className="text-zinc-400 font-medium">Mobile-first live streaming for the next generation.</p>
-          </div>
-          <button 
-            onClick={signIn}
-            className="w-full py-4 bg-white text-black font-bold rounded-2xl flex items-center justify-center gap-3 hover:bg-zinc-200 transition-colors"
-          >
-            <LogIn className="w-5 h-5" />
-            Continue with Google
-          </button>
-        </motion.div>
-      </div>
-    );
-  }
+  if (!isAuthReady || !user) return <div className="h-screen flex items-center justify-center bg-zinc-950 text-white font-black italic uppercase tracking-widest animate-pulse">Initializing...</div>;
 
   return (
     <div className="h-screen bg-zinc-950 text-white flex flex-col overflow-hidden font-sans">
@@ -408,9 +394,15 @@ export default function App() {
           </div>
           <span className="font-black tracking-tighter uppercase italic text-xl">We Share</span>
         </div>
-        <button onClick={logOut} className="p-2 hover:bg-zinc-900 rounded-full transition-colors">
-          <LogOut className="w-5 h-5 text-zinc-400" />
-        </button>
+        <div className="flex items-center gap-3">
+          <div className="flex flex-col items-end">
+            <span className="text-[10px] font-black text-zinc-500 uppercase tracking-widest leading-none">Your ID</span>
+            <span className="text-xs font-bold text-orange-500">{user.displayName}</span>
+          </div>
+          <div className="w-8 h-8 bg-zinc-900 rounded-full flex items-center justify-center border border-zinc-800">
+            <UserIcon className="w-4 h-4 text-zinc-500" />
+          </div>
+        </div>
       </header>
 
       <main className="flex-1 overflow-y-auto">
