@@ -60,15 +60,20 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [viewMode, setViewMode] = useState<'lobby' | 'stream'>('lobby');
+  const [error, setError] = useState<string | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const mediaFileVideoRef = useRef<HTMLVideoElement>(null);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<Socket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const fileStreamRef = useRef<MediaStream | null>(null);
 
   // --- Auth & Firebase Init ---
   useEffect(() => {
@@ -169,8 +174,22 @@ export default function App() {
   };
 
   const startStreaming = async () => {
+    setError(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      } catch (e: any) {
+        console.warn("Could not get both video and audio, trying fallback...", e);
+        if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
+          throw new Error("No camera or microphone found. Please ensure they are connected and try again.");
+        } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
+          throw new Error("Permission denied. Please allow camera and microphone access in your browser settings.");
+        } else {
+          throw new Error("Could not access camera or microphone. Please check your device settings.");
+        }
+      }
+
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       
@@ -187,8 +206,9 @@ export default function App() {
       socketRef.current?.emit('join-room', streamDoc.id);
       setIsStreaming(true);
       setViewMode('stream');
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error starting stream:", err);
+      setError(err.message || "An unexpected error occurred while starting the stream.");
     }
   };
 
@@ -208,10 +228,132 @@ export default function App() {
       await setDoc(doc(db, 'streams', activeStream.id), { status: 'ended' }, { merge: true });
     }
     localStreamRef.current?.getTracks().forEach(track => track.stop());
+    screenStreamRef.current?.getTracks().forEach(track => track.stop());
+    fileStreamRef.current?.getTracks().forEach(track => track.stop());
     peerConnectionRef.current?.close();
     setIsStreaming(false);
+    setIsScreenSharing(false);
     setViewMode('lobby');
     setActiveStream(null);
+  };
+
+  const toggleScreenShare = async () => {
+    if (!isStreaming) return;
+
+    try {
+      if (!isScreenSharing) {
+        const screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+        screenStreamRef.current = screenStream;
+        
+        const videoTrack = screenStream.getVideoTracks()[0];
+        
+        // Replace track in peer connection
+        if (peerConnectionRef.current) {
+          const senders = peerConnectionRef.current.getSenders();
+          const videoSender = senders.find(s => s.track?.kind === 'video');
+          if (videoSender) {
+            videoSender.replaceTrack(videoTrack);
+          }
+        }
+
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = screenStream;
+        }
+
+        videoTrack.onended = () => {
+          stopScreenShare();
+        };
+
+        setIsScreenSharing(true);
+      } else {
+        stopScreenShare();
+      }
+    } catch (err) {
+      console.error("Error toggling screen share:", err);
+    }
+  };
+
+  const stopScreenShare = () => {
+    if (screenStreamRef.current) {
+      screenStreamRef.current.getTracks().forEach(track => track.stop());
+      screenStreamRef.current = null;
+    }
+
+    // Switch back to camera
+    if (localStreamRef.current && peerConnectionRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
+      const senders = peerConnectionRef.current.getSenders();
+      const videoSender = senders.find(s => s.track?.kind === 'video');
+      if (videoSender) {
+        videoSender.replaceTrack(videoTrack);
+      }
+    }
+
+    if (localVideoRef.current && localStreamRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current;
+    }
+
+    setIsScreenSharing(false);
+  };
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || !isStreaming) return;
+
+    const url = URL.createObjectURL(file);
+    if (mediaFileVideoRef.current) {
+      mediaFileVideoRef.current.src = url;
+      mediaFileVideoRef.current.play();
+
+      // Capture stream from video element
+      // @ts-ignore - captureStream is not in standard TS types yet
+      const stream = mediaFileVideoRef.current.captureStream ? mediaFileVideoRef.current.captureStream() : mediaFileVideoRef.current.mozCaptureStream();
+      fileStreamRef.current = stream;
+
+      const videoTrack = stream.getVideoTracks()[0];
+      
+      // Replace track in peer connection
+      if (peerConnectionRef.current) {
+        const senders = peerConnectionRef.current.getSenders();
+        const videoSender = senders.find(s => s.track?.kind === 'video');
+        if (videoSender) {
+          videoSender.replaceTrack(videoTrack);
+        }
+      }
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+
+      mediaFileVideoRef.current.onended = () => {
+        stopFilePlayback();
+      };
+    }
+  };
+
+  const stopFilePlayback = () => {
+    if (fileStreamRef.current) {
+      fileStreamRef.current.getTracks().forEach(track => track.stop());
+      fileStreamRef.current = null;
+    }
+
+    if (mediaFileVideoRef.current) {
+      mediaFileVideoRef.current.src = "";
+    }
+
+    // Switch back to camera
+    if (localStreamRef.current && peerConnectionRef.current) {
+      const videoTrack = localStreamRef.current.getVideoTracks()[0];
+      const senders = peerConnectionRef.current.getSenders();
+      const videoSender = senders.find(s => s.track?.kind === 'video');
+      if (videoSender) {
+        videoSender.replaceTrack(videoTrack);
+      }
+    }
+
+    if (localVideoRef.current && localStreamRef.current) {
+      localVideoRef.current.srcObject = localStreamRef.current;
+    }
   };
 
   const sendMessage = async (e: React.FormEvent) => {
@@ -283,6 +425,16 @@ export default function App() {
             >
               {/* Hero / Action */}
               <section className="bg-gradient-to-br from-zinc-900 to-zinc-950 p-6 rounded-3xl border border-zinc-800 shadow-xl">
+                {error && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-xl text-red-500 text-xs font-medium flex items-center gap-2"
+                  >
+                    <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                    {error}
+                  </motion.div>
+                )}
                 <div className="flex items-center justify-between mb-6">
                   <div className="space-y-1">
                     <h2 className="text-2xl font-bold">Ready to go live?</h2>
@@ -358,6 +510,9 @@ export default function App() {
                   className="w-full h-full object-cover"
                 />
                 
+                {/* Hidden video for media file playback */}
+                <video ref={mediaFileVideoRef} className="hidden" muted />
+                
                 {/* Overlay UI */}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40 p-4 flex flex-col justify-between">
                   <div className="flex items-center justify-between">
@@ -370,12 +525,33 @@ export default function App() {
                         <p className="text-[10px] text-zinc-400">Live • 1.2k watching</p>
                       </div>
                     </div>
-                    <button 
-                      onClick={stopStreaming}
-                      className="bg-red-500 text-white px-4 py-2 rounded-full font-bold text-sm shadow-lg shadow-red-500/20"
-                    >
-                      {isStreaming ? 'End' : 'Leave'}
-                    </button>
+                    
+                    <div className="flex items-center gap-2">
+                      {isStreaming && (
+                        <>
+                          <button 
+                            onClick={toggleScreenShare}
+                            className={cn(
+                              "p-2 rounded-full transition-colors",
+                              isScreenSharing ? "bg-orange-500 text-white" : "bg-black/40 text-white hover:bg-black/60"
+                            )}
+                            title="Share Screen"
+                          >
+                            <Play className="w-5 h-5" />
+                          </button>
+                          <label className="p-2 rounded-full bg-black/40 text-white hover:bg-black/60 cursor-pointer transition-colors" title="Play Media File">
+                            <Video className="w-5 h-5" />
+                            <input type="file" accept="video/*,audio/*" className="hidden" onChange={handleFileUpload} />
+                          </label>
+                        </>
+                      )}
+                      <button 
+                        onClick={stopStreaming}
+                        className="bg-red-500 text-white px-4 py-2 rounded-full font-bold text-sm shadow-lg shadow-red-500/20"
+                      >
+                        {isStreaming ? 'End' : 'Leave'}
+                      </button>
+                    </div>
                   </div>
 
                   {/* Chat Overlay */}
