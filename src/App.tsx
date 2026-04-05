@@ -66,6 +66,10 @@ export default function App() {
   const [newMessage, setNewMessage] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isMediaFileActive, setIsMediaFileActive] = useState(false);
+  const [isMediaPlaying, setIsMediaPlaying] = useState(false);
+  const [mediaVolume, setMediaVolume] = useState(1);
+  const [mediaProgress, setMediaProgress] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [viewMode, setViewMode] = useState<'lobby' | 'stream'>('lobby');
@@ -79,6 +83,30 @@ export default function App() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const fileStreamRef = useRef<MediaStream | null>(null);
+
+  // --- Media File Event Listeners ---
+  useEffect(() => {
+    const video = mediaFileVideoRef.current;
+    if (!video) return;
+
+    const handlePlay = () => setIsMediaPlaying(true);
+    const handlePause = () => setIsMediaPlaying(false);
+    const handleTimeUpdate = () => {
+      if (video.duration) {
+        setMediaProgress((video.currentTime / video.duration) * 100);
+      }
+    };
+
+    video.addEventListener('play', handlePlay);
+    video.addEventListener('pause', handlePause);
+    video.addEventListener('timeupdate', handleTimeUpdate);
+
+    return () => {
+      video.removeEventListener('play', handlePlay);
+      video.removeEventListener('pause', handlePause);
+      video.removeEventListener('timeupdate', handleTimeUpdate);
+    };
+  }, []);
 
   // --- Anonymous User Init ---
   useEffect(() => {
@@ -317,6 +345,7 @@ export default function App() {
     if (mediaFileVideoRef.current) {
       mediaFileVideoRef.current.src = url;
       mediaFileVideoRef.current.play();
+      setIsMediaFileActive(true);
 
       // Capture stream from video element
       // @ts-ignore - captureStream is not in standard TS types yet
@@ -354,6 +383,10 @@ export default function App() {
       mediaFileVideoRef.current.src = "";
     }
 
+    setIsMediaFileActive(false);
+    setIsMediaPlaying(false);
+    setMediaProgress(0);
+
     // Switch back to camera
     if (localStreamRef.current && peerConnectionRef.current) {
       const videoTrack = localStreamRef.current.getVideoTracks()[0];
@@ -366,6 +399,28 @@ export default function App() {
 
     if (localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
+    }
+  };
+
+  const toggleMediaPlay = () => {
+    if (mediaFileVideoRef.current) {
+      if (isMediaPlaying) mediaFileVideoRef.current.pause();
+      else mediaFileVideoRef.current.play();
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const vol = parseFloat(e.target.value);
+    setMediaVolume(vol);
+    if (mediaFileVideoRef.current) {
+      mediaFileVideoRef.current.volume = vol;
+    }
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const seekTo = parseFloat(e.target.value);
+    if (mediaFileVideoRef.current && mediaFileVideoRef.current.duration) {
+      mediaFileVideoRef.current.currentTime = (seekTo / 100) * mediaFileVideoRef.current.duration;
     }
   };
 
@@ -455,26 +510,37 @@ export default function App() {
                   <span className="text-xs font-bold text-zinc-500 uppercase tracking-widest">{streams.length} Active</span>
                 </div>
                 
-                <div className="grid gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {streams.length > 0 ? streams.map(s => (
                     <motion.div 
                       key={s.id}
                       whileTap={{ scale: 0.98 }}
                       onClick={() => joinStream(s)}
-                      className="group bg-zinc-900/50 border border-zinc-800 p-4 rounded-2xl flex items-center gap-4 hover:bg-zinc-900 transition-colors cursor-pointer"
+                      className="group bg-zinc-900/50 border border-zinc-800 rounded-3xl overflow-hidden hover:bg-zinc-900 transition-all cursor-pointer flex flex-col"
                     >
-                      <div className="w-16 h-16 bg-zinc-800 rounded-xl flex items-center justify-center overflow-hidden relative">
-                        <UserIcon className="w-8 h-8 text-zinc-700" />
-                        <div className="absolute top-1 left-1 bg-red-500 text-[10px] font-black px-1.5 py-0.5 rounded uppercase">Live</div>
+                      <div className="aspect-video bg-zinc-800 relative flex items-center justify-center overflow-hidden">
+                        <UserIcon className="w-12 h-12 text-zinc-700" />
+                        <div className="absolute top-3 left-3 bg-red-500 text-[10px] font-black px-2 py-1 rounded-full uppercase tracking-tighter flex items-center gap-1 shadow-lg">
+                          <span className="w-1 h-1 bg-white rounded-full animate-pulse" />
+                          Live
+                        </div>
+                        <div className="absolute bottom-3 right-3 bg-black/60 backdrop-blur-md text-[10px] font-bold px-2 py-1 rounded-full text-white/90">
+                          1.2k watching
+                        </div>
                       </div>
-                      <div className="flex-1 min-w-0">
-                        <h4 className="font-bold truncate">{s.title}</h4>
-                        <p className="text-sm text-zinc-500 truncate">@{s.hostName}</p>
+                      <div className="p-4 flex items-center gap-3">
+                        <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-red-500 rounded-full flex items-center justify-center font-black text-xs">
+                          {s.hostName.charAt(0)}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <h4 className="font-bold truncate text-sm">{s.title}</h4>
+                          <p className="text-xs text-zinc-500 truncate">@{s.hostName}</p>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
                       </div>
-                      <ChevronRight className="w-5 h-5 text-zinc-700 group-hover:text-zinc-400 transition-colors" />
                     </motion.div>
                   )) : (
-                    <div className="py-12 text-center space-y-3">
+                    <div className="col-span-full py-12 text-center space-y-3">
                       <div className="w-16 h-16 bg-zinc-900 rounded-full mx-auto flex items-center justify-center">
                         <VideoOff className="w-8 h-8 text-zinc-800" />
                       </div>
@@ -555,6 +621,58 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+
+                  {/* Media Controls Overlay */}
+                  {isStreaming && isMediaFileActive && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="bg-black/60 backdrop-blur-xl p-4 rounded-3xl border border-white/10 space-y-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <button 
+                            onClick={toggleMediaPlay}
+                            className="w-10 h-10 bg-white text-black rounded-full flex items-center justify-center active:scale-90 transition-transform"
+                          >
+                            {isMediaPlaying ? <Square className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+                          </button>
+                          <button 
+                            onClick={stopFilePlayback}
+                            className="w-10 h-10 bg-zinc-800 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform"
+                          >
+                            <VideoOff className="w-4 h-4" />
+                          </button>
+                        </div>
+                        <div className="flex items-center gap-2 flex-1 max-w-[120px] ml-4">
+                          <Mic className="w-3 h-3 text-zinc-400" />
+                          <input 
+                            type="range" 
+                            min="0" 
+                            max="1" 
+                            step="0.1" 
+                            value={mediaVolume}
+                            onChange={handleVolumeChange}
+                            className="flex-1 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="100" 
+                          value={mediaProgress}
+                          onChange={handleSeek}
+                          className="w-full h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                        />
+                        <div className="flex justify-between text-[8px] font-black uppercase tracking-widest text-zinc-500">
+                          <span>Media Playback</span>
+                          <span>{Math.round(mediaProgress)}%</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
                 </div>
               </div>
 
